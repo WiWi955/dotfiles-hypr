@@ -1,0 +1,67 @@
+# ===============================================
+# PKGS.txt - Dépendances pour Arch Linux Hyprland
+# ===============================================
+
+# 1. Base et Utilitaires Système
+git # Essentiel pour cloner le dépôt
+tree # Pour la vérification de la structure (facultatif mais utile)
+base-devel # Outils pour compiler les paquets AUR
+networkmanager
+iwd
+wireplumber
+pipewire
+pipewire-alsa
+pipewire-jack
+pipewire-pulse
+intel-ucode # Microcode Intel
+sof-firmware # Firmware pour audio
+zram-generator
+polkit-kde-agent # Agent pour les actions nécessitant des privilèges
+ufw # Firewall
+smartmontools
+jq # Utilitaires de traitement JSON (souvent utilisés dans Waybar)
+less
+
+# 2. Hyprland et Environnement de Bureau
+hyprland
+hyprlock
+xdg-desktop-portal-hyprland
+sddm # Display Manager
+sddm-silent-theme # Thème SDDM (AUR) <--- INCLUS MAINTENANT
+
+# 3. Apparence (Barre, Launcher, Notifications, Thème)
+waybar
+rofi
+swaync
+wlogout # (AUR)
+mako # Démon de notification (si utilisé)
+swww # Gestionnaire de fonds d'écran Wayland
+grim # Capture d'écran
+slurp # Sélection de zone pour grim
+hyprpicker # Sélecteur de couleur
+matugen-bin # Outil de theming (AUR)
+catppuccin-whiskers-bin # Paquet AUR pour l'apparence
+
+# 4. Terminal et Shell
+kitty
+fish
+neovim
+htop
+fastfetch
+cava # Visualiseur audio
+
+# 5. Polices et Icônes
+noto-fonts
+noto-fonts-cjk
+noto-fonts-emoji
+woff2-font-awesome # Icônes
+
+# 6. Utilitaires Graphiques
+lxsession # Souvent utilisé pour le démarrage
+qt5-wayland
+qt6-wayland
+vulkan-intel
+lib32-vulkan-intel
+vulkan-radeon
+imagemagick
+cliphist # Gestionnaire d'historique du presse-papiers
