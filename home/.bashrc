@@ -26,3 +26,20 @@ fastfetch -c ~/.config/fastfetch/banner.jsonc
 #   add <texte>       → ajoute une tâche, ex : add Acheter du pain
 list() { omarchy-shell will.todo list; }
 add() { [[ $# -gt 0 ]] && omarchy-shell will.todo add "$*" >/dev/null; }
+
+# Dotfiles : copie la config dans ~/dotfiles-hypr, commit et push sur GitHub.
+#   dotsync                 → message par défaut « maj config »
+#   dotsync "mon message"   → message perso
+dotsync() {
+  (
+    cd ~/dotfiles-hypr || return 1
+    ./sync.sh >/dev/null || return 1
+    git add -A
+    if git diff --cached --quiet; then
+      echo "Rien à envoyer, le dépôt est déjà à jour."
+      return 0
+    fi
+    git status --short
+    git commit -q -m "${*:-maj config}" && git push -q && echo "Envoyé sur GitHub ✓"
+  )
+}
