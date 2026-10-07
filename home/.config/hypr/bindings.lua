@@ -63,7 +63,11 @@ o.bind("SUPER + CTRL + S", "Steam", { launch = "steam" })
 
 o.bind("SUPER + N", "SSH NAS", "xdg-terminal-exec --title=NAS ssh nas")
 o.bind("SUPER + I", "SSH serveur IA (réveil auto)", "xdg-terminal-exec --title=IA ia")
-o.bind("SUPER + ALT + I", "Widget lab-ia / NAS", "omarchy-shell will.lab-ia toggle")
+o.bind("SUPER + ALT + I", "Widget lab-ia / NAS", "omarchy-shell shell toggle will.lab-ia")
+
+hl.unbind("SUPER + T") -- was: Toggle window floating/tiling (now SUPER+SHIFT+T)
+o.bind("SUPER + T", "To-do list", "omarchy-shell shell toggle will.todo")
+o.bind("SUPER + SHIFT + T", "Toggle window floating/tiling", hl.dsp.window.float({ action = "toggle" }))
 
 -- Utilities --------------------------------------------------------------
 

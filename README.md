@@ -44,11 +44,11 @@ Les fichiers suivis sont listés dans [`files.txt`](files.txt) ; ajoute une lign
 | Règles de fenêtres, opacité, anti-veille YouTube | `.config/hypr/hyprland.lua` |
 | Look & feel, clavier/souris, écrans | `.config/hypr/{looknfeel,input,monitors,display}.lua` |
 | Barre + widgets, veille/verrouillage | `.config/omarchy/shell.json` |
-| Widgets perso | `.config/omarchy/plugins/will.lab-ia` (serveur IA / NAS / PC), `will.monitor` (écrans) |
+| Widgets perso | `.config/omarchy/plugins/will.lab-ia` (serveur IA / NAS / PC), `will.monitor` (écrans), `will.todo` (to-do) |
 | Menu | `.config/omarchy/extensions/omarchy-menu.jsonc` |
 | Thème | `.config/omarchy/themes/wiwi` (couleurs via matugen) |
 | Fonds animés / sélecteur | `.local/bin/wiwi-*` + services `wiwi-*` dans `.config/systemd/user` |
-| Prompt bash + fastfetch | `.bashrc`, `.config/fastfetch/banner.jsonc` |
+| Prompt bash + fastfetch, commandes `list` / `add` (to-do) | `.bashrc`, `.config/fastfetch/banner.jsonc` |
 | Dictée vocale | `.config/voxtype/config.toml` |
 | Paquets en plus d'Omarchy | `packages.txt` |
 
@@ -66,6 +66,8 @@ Les fichiers suivis sont listés dans [`files.txt`](files.txt) ; ajoute une lign
 | `SUPER+CTRL+S` | Steam |
 | `SUPER+N` / `SUPER+I` | SSH NAS / serveur IA (réveil Wake-on-LAN) |
 | `SUPER+ALT+I` | Widget lab-ia / NAS |
+| `SUPER+T` | Widget to-do |
+| `SUPER+SHIFT+T` | Fenêtre flottante / en mosaïque |
 | `SUPER+W` | Sélecteur de fond d'écran (images + vidéos) |
 | `SUPER+L` | Verrouiller |
 | `SUPER+SHIFT+S` | Capture d'écran |

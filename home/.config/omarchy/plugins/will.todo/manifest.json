@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "will.todo",
+  "name": "To-do",
+  "version": "1.0.0",
+  "author": "will",
+  "description": "Liste de tâches dans la barre",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "To-do",
+    "description": "Liste de tâches dans la barre",
+    "category": "Productivity",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

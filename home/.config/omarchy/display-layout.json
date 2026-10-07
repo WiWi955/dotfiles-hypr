@@ -32,7 +32,7 @@
       }
     },
     "desc:AOC 25G3ZM WKRQ3HA007190|desc:Microstep MPG271QX OLED 0x01010101|eDP-1": {
-      "mode": "extend",
+      "mode": "second",
       "positions": {
         "eDP-1": [
           3456,

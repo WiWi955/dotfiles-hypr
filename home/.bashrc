@@ -20,3 +20,9 @@ PS1='\[\e[35m\]༼ つ◕_◕ ༽つ\[\e[m\] \[\e[36m\]:\[\e[m\] \[\e[36m\]:\[\e
 
 # Terminal banner (ported from dotfiles-hypr fastfetch config).
 fastfetch -c ~/.config/fastfetch/banner.jsonc
+
+# To-do list (widget will.todo dans la barre)
+#   list              → affiche les tâches
+#   add <texte>       → ajoute une tâche, ex : add Acheter du pain
+list() { omarchy-shell will.todo list; }
+add() { [[ $# -gt 0 ]] && omarchy-shell will.todo add "$*" >/dev/null; }

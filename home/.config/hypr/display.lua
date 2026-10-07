@@ -9,8 +9,5 @@ local function omarchy_flag(name)
 end
 local laptop_closed = omarchy_flag("internal-monitor-clamshell")
 
-if not laptop_closed then
-  hl.monitor({ output = "eDP-1", mode = "1920x1200@60.00", position = "3456x280", scale = 1.5 })
-end
 hl.monitor({ output = "desc:Microstep MPG271QX OLED 0x01010101", mode = "2560x1440@59.95", position = "0x216", scale = 1.6667 })
 hl.monitor({ output = "desc:AOC 25G3ZM WKRQ3HA007190", mode = "1920x1080@60.00", position = "1536x0", scale = 1 })
