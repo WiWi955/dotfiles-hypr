@@ -87,7 +87,7 @@ o.bind("SUPER + V", "Clipboard history", "omarchy-shell shell toggle omarchy.cli
 
 o.bind("SUPER + R", "Restart bar", "omarchy-restart-shell")
 o.bind_toggle("SUPER + H", "Hide bar", "bar")
-o.bind("SUPER + M", "Toggle display mirroring", "omarchy-hyprland-monitor-internal-mirror toggle")
+o.bind("SUPER + M", "Toggle display mirroring", "/home/will/.local/bin/display-mirror-toggle")
 
 -- Dictation (voxtype): push-to-talk on CTRL+SHIFT+SPACE instead of F9.
 hl.unbind("F9")
