@@ -10,7 +10,8 @@ import "Dates.js" as Dates
 // Les tâches sont stockées dans ~/.local/share/todo/todos.json.
 //
 // Date limite : un mot en @ dans le texte (@demain, @ven, @+3, @25/10…),
-// voir Dates.js. L'icône de la barre passe en rouge s'il y a une tâche
+// voir Dates.js. Les tâches sont triées par date limite (sans date à la fin).
+// L'icône de la barre passe en rouge s'il y a une tâche
 // pour aujourd'hui ou en retard.
 //
 // clic gauche = panneau · clic droit = afficher/masquer le compteur
@@ -63,7 +64,7 @@ Panel {
     if (raw === lastWritten) return
     try {
       var parsed = JSON.parse(raw)
-      todos = Array.isArray(parsed) ? parsed.filter(function(t) { return t && typeof t.text === "string" }) : []
+      todos = Array.isArray(parsed) ? Dates.sortByDue(parsed.filter(function(t) { return t && typeof t.text === "string" })) : []
     } catch (e) {
       todos = []
     }
@@ -71,8 +72,11 @@ Panel {
     if (cursor >= todos.length) cursor = todos.length - 1
   }
 
+  // Trie par date limite et garde le curseur sur la même tâche si elle bouge.
   function save(next) {
-    todos = next
+    var selected = cursor >= 0 && cursor < next.length ? next[cursor] : null
+    todos = Dates.sortByDue(next)
+    if (selected) cursor = todos.indexOf(selected)
     if (cursor >= todos.length) cursor = todos.length - 1
     lastWritten = JSON.stringify(todos, null, 2) + "\n"
     dataFile.setText(lastWritten)

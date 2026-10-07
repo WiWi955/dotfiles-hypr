@@ -106,3 +106,12 @@ function dueInfo(due, now) {
   if (d.getFullYear() !== now.getFullYear()) label += "/" + d.getFullYear()
   return { label: label, level: "later" }
 }
+
+// Tri par date limite (la plus proche en haut), tâches sans date à la fin.
+// À date égale, l'ordre existant est conservé.
+function sortByDue(todos) {
+  return todos
+    .map(function(t, i) { return { t: t, i: i, key: fromIso(t.due) ? t.due : "9999-99-99" } })
+    .sort(function(a, b) { return a.key < b.key ? -1 : a.key > b.key ? 1 : a.i - b.i })
+    .map(function(e) { return e.t })
+}
