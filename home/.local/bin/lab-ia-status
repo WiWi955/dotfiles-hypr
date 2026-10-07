@@ -1,0 +1,22 @@
+#!/bin/bash
+# État de lab-ia en JSON pour le widget de la barre.
+# En ligne : mesures complètes du serveur. Sinon : le NAS dit si la tour est éteinte ou sur Windows.
+
+if out=$(timeout 6 ssh -o BatchMode=yes -o ConnectTimeout=4 ia '~/.local/bin/lab-ia-stats' 2>/dev/null) && [[ -n $out ]]; then
+  printf '%s\n' "$out"
+  exit 0
+fi
+
+state=$(timeout 6 ssh -o BatchMode=yes -o ConnectTimeout=4 nas 'python3 -c "
+import socket
+def p(port):
+    s = socket.socket(); s.settimeout(1)
+    try: s.connect((\"192.168.1.43\", port)); return \"open\"
+    except ConnectionRefusedError: return \"refused\"
+    except Exception: return \"timeout\"
+    finally: s.close()
+a = p(22)
+print(\"booting\" if a == \"open\" else \"windows\" if p(445) == \"open\" else \"booting\" if a == \"refused\" else \"off\")
+"' 2>/dev/null)
+
+printf '{"online": false, "state": "%s"}\n' "${state:-unreachable}"

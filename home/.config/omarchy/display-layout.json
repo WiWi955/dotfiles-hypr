@@ -1,0 +1,68 @@
+{
+  "version": 2,
+  "outputs": {
+    "eDP-1": {
+      "mode": "1920x1200@60.00",
+      "transform": 0,
+      "scale": 1.5
+    },
+    "desc:Microstep MPG271QX OLED 0x01010101": {
+      "mode": "2560x1440@59.95",
+      "transform": 0,
+      "scale": 1.6667
+    },
+    "desc:AOC 25G3ZM WKRQ3HA007190": {
+      "mode": "1920x1080@60.00",
+      "transform": 0,
+      "scale": 1.0
+    }
+  },
+  "profiles": {
+    "desc:Microstep MPG271QX OLED 0x01010101|eDP-1": {
+      "mode": "extend",
+      "positions": {
+        "eDP-1": [
+          1536,
+          100
+        ],
+        "desc:Microstep MPG271QX OLED 0x01010101": [
+          0,
+          0
+        ]
+      }
+    },
+    "desc:AOC 25G3ZM WKRQ3HA007190|desc:Microstep MPG271QX OLED 0x01010101|eDP-1": {
+      "mode": "extend",
+      "positions": {
+        "eDP-1": [
+          3456,
+          280
+        ],
+        "desc:Microstep MPG271QX OLED 0x01010101": [
+          0,
+          216
+        ],
+        "desc:AOC 25G3ZM WKRQ3HA007190": [
+          1536,
+          0
+        ]
+      }
+    },
+    "desc:AOC 25G3ZM WKRQ3HA007190|eDP-1": {
+      "mode": "extend",
+      "positions": {
+        "eDP-1": [
+          0,
+          0
+        ],
+        "desc:AOC 25G3ZM WKRQ3HA007190": [
+          1280,
+          0
+        ]
+      }
+    },
+    "eDP-1": {
+      "mode": "pc"
+    }
+  }
+}

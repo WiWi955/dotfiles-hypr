@@ -1,0 +1,115 @@
+#!/bin/bash
+# Réveille la tour (Wake-on-LAN via le NAS), attend Debian, puis ouvre SSH sur "ia".
+# Couleurs = palette ANSI du terminal, donc elles suivent le thème Omarchy.
+
+HOST_IP="192.168.1.43"
+TIMEOUT=180
+CACHE="$HOME/.cache/ia-boot-seconds"   # durée du dernier démarrage, pour estimer la barre
+
+ssh_ia() { ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=accept-new ia "$@"; }
+
+if ssh_ia true 2>/dev/null; then
+  exec ssh ia "$@"
+fi
+
+# --- Couleurs (indices de la palette du thème) ---------------------------
+R=$'\e[0m' B=$'\e[1m' DIM=$'\e[90m'
+RED=$'\e[31m' GREEN=$'\e[32m' YELLOW=$'\e[33m' BLUE=$'\e[34m' MAG=$'\e[35m' CYAN=$'\e[36m'
+
+SPIN=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+STEPS=("Magic packet envoyé via le NAS" "Allumage de la tour" "Démarrage de Debian" "Connexion SSH")
+EXPECTED=$(cat "$CACHE" 2>/dev/null || echo 45)
+
+STATE=$(mktemp)
+cleanup() { printf '\e[?25h'; rm -f "$STATE"; kill "$CHECKER" 2>/dev/null; }
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+# Sonde exécutée sur le NAS : off | up (machine allumée, SSH pas prêt) | ssh | windows
+PROBE='python3 -c "
+import socket
+def p(port):
+    s = socket.socket(); s.settimeout(1)
+    try: s.connect((\"'"$HOST_IP"'\", port)); return \"open\"
+    except ConnectionRefusedError: return \"refused\"
+    except Exception: return \"timeout\"
+    finally: s.close()
+a = p(22)
+print(\"ssh\" if a == \"open\" else \"windows\" if p(445) == \"open\" else \"up\" if a == \"refused\" else \"off\")
+"'
+
+# --- Vérification en arrière-plan ----------------------------------------
+echo 0 > "$STATE"
+(
+  ssh nas '~/bin/wake' >/dev/null 2>&1 || { echo fail-nas > "$STATE"; exit; }
+  echo 1 > "$STATE"
+  while :; do
+    case $(ssh nas "$PROBE" 2>/dev/null) in
+      up) echo 2 > "$STATE" ;;
+      ssh) ssh_ia true 2>/dev/null && { echo 4 > "$STATE"; exit; }; echo 3 > "$STATE" ;;
+      windows) echo windows > "$STATE"; exit ;;
+    esac
+    sleep 1
+  done
+) &
+CHECKER=$!
+
+# --- Affichage -----------------------------------------------------------
+bar() {
+  local pct=$1 width=32 fill i out=""
+  fill=$((pct * width / 100))
+  for ((i = 0; i < width; i++)); do
+    if ((i < fill)); then out+="${MAG}━"; elif ((i == fill)); then out+="${CYAN}╸"; else out+="${DIM}━"; fi
+  done
+  printf '%s%s' "$out" "$R"
+}
+
+printf '\e[?25l\n'
+printf '  %s%s󰍹  lab-ia%s %s· Ollama sur Debian 13%s\n\n' "$B" "$BLUE" "$R" "$DIM" "$R"
+LINES_DRAWN=0
+start=$SECONDS frame=0
+
+while :; do
+  st=$(cat "$STATE")
+  elapsed=$((SECONDS - start))
+
+  case $st in
+    fail-nas) msg="${RED}✗ Impossible de joindre le NAS.${R}"; break ;;
+    windows)  msg="${YELLOW}󰖳  La tour a démarré sur Windows, pas sur Debian.${R}"; break ;;
+  esac
+  ((elapsed >= TIMEOUT)) && { msg="${RED}✗ Pas de réponse après $((TIMEOUT / 60)) min.${R}"; break; }
+
+  ((LINES_DRAWN)) && printf '\e[%dA' "$LINES_DRAWN"
+  for i in "${!STEPS[@]}"; do
+    if ((i < st)); then
+      printf '\e[2K  %s✓%s %s\n' "$GREEN" "$R" "${STEPS[i]}"
+    elif ((i == st)); then
+      printf '\e[2K  %s%s%s %s%s%s %s%ds%s\n' "$CYAN" "${SPIN[frame % 10]}" "$R" "$B" "${STEPS[i]}" "$R" "$DIM" "$elapsed" "$R"
+    else
+      printf '\e[2K  %s· %s%s\n' "$DIM" "${STEPS[i]}" "$R"
+    fi
+  done
+
+  pct=$((st >= 4 ? 100 : elapsed * 95 / EXPECTED))
+  ((pct > 95 && st < 4)) && pct=95
+  remaining=$((EXPECTED - elapsed))
+  if ((st >= 4)); then eta="${GREEN}prêt${R}"
+  elif ((remaining > 0)); then eta="${DIM}~${remaining}s${R}"
+  else eta="${DIM}presque…${R}"; fi
+  printf '\e[2K\n\e[2K  %s %s%3d%%%s  %s\n' "$(bar "$pct")" "$B" "$pct" "$R" "$eta"
+  LINES_DRAWN=$((${#STEPS[@]} + 2))
+
+  if ((st >= 4)); then
+    echo "$elapsed" > "$CACHE"
+    printf '\n'
+    cleanup
+    exec ssh ia "$@"
+  fi
+
+  frame=$((frame + 1))
+  sleep 0.1
+done
+
+printf '\n  %s\n\n' "$msg"
+read -rp "  Appuie sur Entrée pour fermer " _
+exit 1

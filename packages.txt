@@ -1,0 +1,20 @@
+# Paquets installés en plus de la base Omarchy (dépôts officiels + AUR)
+kitty
+zen-browser-bin
+firefox
+visual-studio-code-bin
+keepassxc
+steam
+tailscale
+rclone
+voxtype-bin
+
+# Utilisés par les scripts wiwi (fonds animés, couleurs auto, widgets)
+matugen
+mpvpaper
+ffmpeg
+imagemagick
+rsync
+jq
+lm_sensors
+iw

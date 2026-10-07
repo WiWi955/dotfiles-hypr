@@ -1,0 +1,8 @@
+[Unit]
+Description=Surveille les fonds d'écran du thème wiwi
+
+[Path]
+PathChanged=%h/.config/omarchy/themes/wiwi/backgrounds
+
+[Install]
+WantedBy=default.target

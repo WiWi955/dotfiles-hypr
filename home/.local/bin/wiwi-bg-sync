@@ -1,0 +1,29 @@
+#!/bin/bash
+# Recopie les fonds d'écran du thème wiwi dans le thème actif (si wiwi est actif),
+# génère les miniatures des vidéos et pré-génère les miniatures du sélecteur SUPER+W.
+SRC="$HOME/.config/omarchy/themes/wiwi/backgrounds/"
+STATE="$HOME/.local/state/omarchy/current"
+VIDEO_THUMBS="$HOME/.cache/wiwi-bg/videos"
+VIDEO_FRAMES="$HOME/.cache/wiwi-bg/frames"   # même image sans le ▶, utilisée comme fond fixe sous la vidéo
+[[ $(cat "$STATE/theme.name" 2>/dev/null) == wiwi ]] || exit 0
+rsync -a --delete "$SRC" "$STATE/theme/backgrounds/"
+
+# Une miniature (avec un ▶) par vidéo, nommée "<vidéo>.png"
+mkdir -p "$VIDEO_THUMBS" "$VIDEO_FRAMES"
+shopt -s nullglob nocaseglob
+for video in "$SRC"*.{mp4,webm,mkv,mov}; do
+  thumb="$VIDEO_THUMBS/${video##*/}.png"
+  frame="$VIDEO_FRAMES/${video##*/}.jpg"
+  [[ -f $thumb && $thumb -nt $video && -f $frame ]] && continue
+  ffmpeg -loglevel error -y -ss 1 -i "$video" -frames:v 1 -q:v 2 "$frame" &&
+    magick "$frame" -resize 1536x864^ -gravity center -extent 1536x864 \
+      -fill '#000000a0' -draw 'circle 768,432 768,322' \
+      -fill white -draw 'polygon 728,372 728,492 828,432' "$thumb"
+done
+for thumb in "$VIDEO_THUMBS"/*.png; do
+  name=${thumb##*/}
+  [[ -f $SRC${name%.png} ]] || rm -f "$thumb" "$VIDEO_FRAMES/${name%.png}.jpg"
+done
+
+omarchy-menu-images --cache-only "$STATE/theme/backgrounds" "$HOME/.config/omarchy/backgrounds/wiwi" >/dev/null 2>&1
+omarchy-menu-images --cache-only "$VIDEO_THUMBS" >/dev/null 2>&1

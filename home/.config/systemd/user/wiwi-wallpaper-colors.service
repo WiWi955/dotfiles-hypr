@@ -1,0 +1,6 @@
+[Unit]
+Description=Regenerate wiwi theme colors from the wallpaper
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/wiwi-wallpaper-colors

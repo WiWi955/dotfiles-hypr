@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+# État du PC portable en JSON pour le widget de la barre (onglet « PC » de will.lab-ia).
+# Mesures locales sans root : CPU, GPU Intel Arc (via RC6), RAM, SSD, batterie, Wi-Fi.
+import glob, json, os, re, socket, subprocess, time
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+def num(path, default=0):
+    try:
+        return int(read(path))
+    except ValueError:
+        return default
+
+def cpu_times():
+    v = list(map(int, read("/proc/stat").splitlines()[0].split()[1:]))
+    idle = v[3] + v[4]
+    return idle, sum(v)
+
+def net_bytes(iface):
+    base = f"/sys/class/net/{iface}/statistics/"
+    return num(base + "rx_bytes"), num(base + "tx_bytes")
+
+def default_iface():
+    try:
+        out = subprocess.run(["ip", "route", "get", "1.1.1.1"], capture_output=True, text=True, timeout=2).stdout
+        m = re.search(r"dev (\S+).* src (\S+)", out)
+        return (m.group(1), m.group(2)) if m else ("", "")
+    except Exception:
+        return "", ""
+
+GT = "/sys/class/drm/card1/gt/gt0/"
+iface, ip = default_iface()
+
+# Deux relevés à 0,5 s d'écart pour les taux (CPU, GPU, réseau)
+idle0, total0 = cpu_times()
+rc60, t0 = num(GT + "rc6_residency_ms"), time.monotonic()
+rx0, tx0 = net_bytes(iface) if iface else (0, 0)
+time.sleep(0.5)
+idle1, total1 = cpu_times()
+rc61, t1 = num(GT + "rc6_residency_ms"), time.monotonic()
+rx1, tx1 = net_bytes(iface) if iface else (0, 0)
+dt = t1 - t0
+
+cpu_percent = round(100 * (1 - (idle1 - idle0) / max(1, total1 - total0)))
+gpu_busy = max(0, min(100, round(100 * (1 - (rc61 - rc60) / (dt * 1000)))))
+
+# Températures (sensors -j)
+try:
+    sensors = json.loads(subprocess.run(["sensors", "-j"], capture_output=True, text=True, timeout=2).stdout)
+except Exception:
+    sensors = {}
+def temp(chip, label):
+    return round(sensors.get(chip, {}).get(label, {}).get("temp1_input", 0))
+
+# Fréquence CPU moyenne
+freqs = [num(p) for p in glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq")]
+cpu_freq = round(sum(freqs) / len(freqs) / 1000) if freqs else 0
+
+# Mémoire
+mem = {}
+for line in read("/proc/meminfo").splitlines():
+    k, v = line.split(":", 1)
+    mem[k] = int(v.split()[0]) * 1024
+
+st = os.statvfs("/")
+bat = "/sys/class/power_supply/BAT0/"
+
+# Wi-Fi
+ssid, signal = "", 0
+if iface.startswith("wl"):
+    try:
+        link = subprocess.run(["iw", "dev", iface, "link"], capture_output=True, text=True, timeout=2).stdout
+        m = re.search(r"SSID: (.+)", link); ssid = m.group(1) if m else ""
+        m = re.search(r"signal: (-?\d+)", link); signal = int(m.group(1)) if m else 0
+    except Exception:
+        pass
+
+# Écrans
+try:
+    mons = json.loads(subprocess.run(["hyprctl", "monitors", "-j"], capture_output=True, text=True, timeout=2).stdout)
+    displays = [{"name": m["name"], "model": m.get("model", ""), "width": m["width"], "height": m["height"],
+                 "refresh": round(m["refreshRate"])} for m in mons]
+except Exception:
+    displays = []
+
+print(json.dumps({
+    "online": True,
+    "hostname": socket.gethostname(),
+    "model": (read("/sys/class/dmi/id/sys_vendor").title() + " " + read("/sys/class/dmi/id/product_version")).strip(),
+    "os": "Omarchy " + subprocess.run(["omarchy-version"], capture_output=True, text=True).stdout.strip().split("-")[0],
+    "kernel": os.uname().release,
+    "uptime": int(float(read("/proc/uptime", "0").split()[0])),
+    "profile": read("/sys/firmware/acpi/platform_profile"),
+    "cpu": {"percent": cpu_percent, "temp": temp("coretemp-isa-0000", "Package id 0"), "freq": cpu_freq,
+            "threads": os.cpu_count()},
+    "gpu": {"busy": gpu_busy, "freq": num(GT + "rps_act_freq_mhz") or num(GT + "rps_cur_freq_mhz"), "freqMax": num(GT + "rps_RP0_freq_mhz")},
+    "ram": {"used": mem["MemTotal"] - mem["MemAvailable"], "total": mem["MemTotal"]},
+    "disk": {"used": (st.f_blocks - st.f_bfree) * st.f_frsize, "total": st.f_blocks * st.f_frsize,
+             "temp": temp("nvme-pci-0100", "Composite")},
+    "battery": {"percent": num(bat + "capacity"), "status": read(bat + "status"),
+                "watts": round(num(bat + "power_now") / 1e6, 1),
+                "health": round(100 * num(bat + "energy_full") / max(1, num(bat + "energy_full_design"))),
+                "cycles": num(bat + "cycle_count"), "ac": num("/sys/class/power_supply/ADP1/online") == 1},
+    "net": {"iface": iface, "ip": ip, "ssid": ssid, "signal": signal,
+            "rx": round((rx1 - rx0) / dt), "tx": round((tx1 - tx0) / dt)},
+    "displays": displays,
+}))

@@ -1,0 +1,47 @@
+#!/bin/bash
+# Sélecteur de fond (SUPER+W) avec une tuile "Ouvrir le dossier",
+# les vidéos (miniatures ▶) et les GIF animés via mpvpaper.
+
+# Second appui sur SUPER+W : fermer le sélecteur déjà ouvert
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/wiwi-bg-switcher.lock"
+if ! flock -n 9; then
+  omarchy-shell shell hide omarchy.image-picker >/dev/null 2>&1
+  exit 0
+fi
+
+BUTTON="$HOME/.local/share/wiwi-bg/button/ouvrir-le-dossier.png"
+VIDEO_THUMBS="$HOME/.cache/wiwi-bg/videos"
+FOLDER="$HOME/.config/omarchy/themes/wiwi/backgrounds"
+STATE="$HOME/.local/state/omarchy/current"
+theme_name=$(cat "$STATE/theme.name" 2>/dev/null)
+[[ $theme_name == wiwi ]] || FOLDER="$HOME/.config/omarchy/backgrounds/$theme_name"
+
+wiwi-bg-sync
+
+# Élément sélectionné à l'ouverture : la vidéo animée active, sinon le fond actuel
+selected=$(readlink -f "$STATE/background")
+animated=$(wiwi-animated-bg current)
+if [[ -n $animated && -f "$VIDEO_THUMBS/${animated##*/}.png" ]]; then
+  selected="$VIDEO_THUMBS/${animated##*/}.png"
+fi
+
+choice=$(omarchy-menu-images --selected "$selected" \
+  "${BUTTON%/*}" "$VIDEO_THUMBS" "$STATE/theme/backgrounds" "$HOME/.config/omarchy/backgrounds/$theme_name")
+
+[[ -n $choice ]] || exit 0
+
+if [[ $choice == "$BUTTON" ]]; then
+  mkdir -p "$FOLDER"
+  setsid -f nautilus "$FOLDER" >/dev/null 2>&1
+elif [[ $choice == "$VIDEO_THUMBS"/* ]]; then
+  # Vidéo : une image de la vidéo (sans le ▶) sert de fond fixe dessous, mpvpaper joue la vidéo par-dessus
+  name=${choice##*/}
+  wiwi-animated-bg start "$FOLDER/${name%.png}"
+  omarchy-theme-bg-set "$HOME/.cache/wiwi-bg/frames/${name%.png}.jpg"
+elif [[ ${choice,,} == *.gif ]]; then
+  wiwi-animated-bg start "$FOLDER/${choice##*/}"
+  omarchy-theme-bg-set "$choice"
+else
+  wiwi-animated-bg stop
+  omarchy-theme-bg-set "$choice"
+fi

@@ -1,2 +1,6 @@
-# Large binary files
-config/hypr/current_wallpaper
+*.bak.*
+__pycache__/
+*.mp4
+*.webm
+*.mkv
+*.mov

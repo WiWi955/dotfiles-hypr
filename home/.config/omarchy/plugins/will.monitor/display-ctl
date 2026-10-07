@@ -1,0 +1,811 @@
+#!/usr/bin/env python3
+"""Backend du widget Display (will.monitor).
+
+Gère les écrans comme les paramètres d'affichage de Windows :
+  - mode de projection : pc | duplicate | extend | second  (Win+P)
+  - disposition libre des écrans, bords aimantés
+  - résolution / fréquence / orientation / échelle par écran
+
+Chaque écran est reconnu par son modèle (EDID, ex. « desc:Microstep MPG271QX
+OLED 0x01010101 ») et non par la prise où il est branché : il garde ses
+réglages sur n'importe quel port. Le mode et la disposition sont mémorisés
+par combinaison d'écrans branchés (un « profil »), comme sous Windows.
+
+La configuration vit dans ~/.config/omarchy/display-layout.json et est
+traduite en règles Hyprland dans ~/.config/hypr/display.lua (chargé par
+hyprland.lua après les toggles Omarchy), puis appliquée avec `hyprctl reload`.
+
+`display-ctl watch` (lancé au démarrage de Hyprland) surveille les
+branchements : il réapplique le profil de la nouvelle combinaison d'écrans
+et rallume immédiatement le portable s'il ne reste plus d'écran externe.
+
+Usage :
+  display-ctl state
+  display-ctl mode <pc|duplicate|extend|second>
+  display-ctl place <output> <x> <y> [...]   (px logiques)
+  display-ctl position <right|left|above|below>
+  display-ctl set <output> [mode=WxH@R] [transform=0-3] [scale=N]
+  display-ctl confirm <output> [...]   comme `set`, mais rétablit l'ancien
+                                       réglage après 15 s sans `keep`
+  display-ctl keep | revert
+  display-ctl reconcile                applique le profil des écrans branchés
+  display-ctl watch                    surveille les branchements (démon)
+"""
+
+import fcntl
+import json
+import math
+import os
+import re
+import select
+import socket
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+STATE_FILE = os.path.join(HOME, ".config/omarchy/display-layout.json")
+SNAPSHOT_FILE = os.path.join(HOME, ".local/state/omarchy/display-layout.snapshot.json")
+PENDING_FILE = os.path.join(HOME, ".local/state/omarchy/display-layout.pending")
+CONFIRM_SECONDS = 15
+LUA_FILE = os.path.join(HOME, ".config/hypr/display.lua")
+TOGGLES = os.path.join(HOME, ".local/state/omarchy/toggles/hypr")
+MIRROR_TOGGLE = os.path.join(TOGGLES, "internal-monitor-mirror.lua")
+DISABLE_TOGGLE = os.path.join(TOGGLES, "internal-monitor-disable.lua")
+RUNTIME = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+LOCK_FILE = os.path.join(RUNTIME, "display-ctl.lock")
+WATCH_LOCK = os.path.join(RUNTIME, "display-ctl-watch.lock")
+
+MODES = ("pc", "duplicate", "extend", "second")
+POSITIONS = ("right", "left", "above", "below")
+SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+CONNECTOR = re.compile(r"^[A-Za-z]+(-[A-Za-z])?-\d+$")
+# Description EDID utilisable telle quelle dans une chaîne Lua.
+SAFE_DESC = re.compile(r"^[A-Za-z0-9 ._,:()+/#&-]+$")
+SAFE_MODE = re.compile(r"^\d+x\d+@\d+(\.\d+)?$")
+# Recouvrement minimal (px logiques) entre deux écrans voisins, pour que la
+# souris puisse vraiment passer de l'un à l'autre (comme Windows, qui refuse
+# les écrans qui ne se touchent que par un coin).
+MIN_OVERLAP = 64
+
+
+LOG_FILE = os.path.join(HOME, ".local/state/omarchy/display-ctl.log")
+
+
+def log(msg):
+    """Message sur stderr et dans ~/.local/state/omarchy/display-ctl.log
+    (limité à ~200 Ko), pour comprendre après coup ce qui s'est passé."""
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
+    print(f"display-ctl: {msg}", file=sys.stderr, flush=True)
+    try:
+        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 200_000:
+            os.replace(LOG_FILE, LOG_FILE + ".1")
+        with open(LOG_FILE, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------- écrans --
+
+def is_internal(name):
+    return bool(re.match(r"^(eDP|LVDS|DSI)-", name))
+
+
+def ident(m):
+    """Identifiant stable d'un écran : la prise pour le portable, le modèle
+    (EDID) pour un écran externe, pour qu'il garde ses réglages sur tout port."""
+    if is_internal(m["name"]):
+        return m["name"]
+    desc = (m.get("description") or "").strip()
+    return f"desc:{desc}" if desc and SAFE_DESC.match(desc) else m["name"]
+
+
+def hypr_monitors():
+    """Tous les écrans branchés (allumés ou non). Les noms suspects sont
+    écartés : ils finissent dans du Lua."""
+    out = subprocess.run(["hyprctl", "monitors", "all", "-j"], capture_output=True, text=True).stdout
+    try:
+        monitors = json.loads(out)
+    except json.JSONDecodeError:
+        return []
+    safe = []
+    for m in monitors:
+        # Seulement de vraies prises (eDP-1, DP-2, HDMI-A-1…) : pas les sorties
+        # virtuelles (headless, FALLBACK).
+        if not CONNECTOR.match(m.get("name", "")) or "headless" in (m.get("description") or "").lower():
+            continue
+        safe.append(m)
+    return safe
+
+
+def split_monitors(monitors):
+    internal = next((m for m in monitors if is_internal(m["name"])), None)
+    externals = [m for m in monitors if not is_internal(m["name"])]
+    return internal, externals
+
+
+def profile_key(monitors):
+    return "|".join(sorted(ident(m) for m in monitors))
+
+
+# ------------------------------------------------------------------ état --
+
+def load_state():
+    try:
+        with open(STATE_FILE) as f:
+            state = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    state.setdefault("outputs", {})
+    state.setdefault("profiles", {})
+    return state
+
+
+def migrate(state, monitors):
+    """Ancien format (réglages rangés par prise, un seul mode) -> profils."""
+    if state.get("version") == 2:
+        return state
+    by_name = {m["name"]: ident(m) for m in monitors}
+    outputs = {}
+    for key, val in state.get("outputs", {}).items():
+        if key.startswith("desc:") or is_internal(key):
+            outputs[key] = val
+        elif key in by_name:
+            outputs[by_name[key]] = val
+    profile = {"mode": state.get("mode", "extend")}
+    positions = {by_name[k]: v for k, v in (state.get("positions") or {}).items() if k in by_name}
+    if positions:
+        profile["positions"] = positions
+    new = {"version": 2, "outputs": outputs, "profiles": {}}
+    if monitors:
+        new["profiles"][profile_key(monitors)] = profile
+    return new
+
+
+def save_state(state):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, STATE_FILE)
+
+
+def current_profile(state, monitors):
+    """Profil de la combinaison d'écrans branchés. Une combinaison jamais vue
+    démarre en mode étendu, comme Windows."""
+    internal, externals = split_monitors(monitors)
+    default = "extend" if externals else "pc"
+    return state["profiles"].setdefault(profile_key(monitors), {"mode": default})
+
+
+def detect_mode(monitors, profile):
+    internal, externals = split_monitors(monitors)
+    if not internal or not externals:
+        return profile.get("mode", "extend")
+    if os.path.exists(DISABLE_TOGGLE) or internal.get("disabled"):
+        return "second"
+    if os.path.exists(MIRROR_TOGGLE) or any(m.get("mirrorOf", "none") != "none" for m in externals):
+        return "duplicate"
+    if all(m.get("disabled") for m in externals):
+        return "pc"
+    return "extend"
+
+
+# -------------------------------------------------------------- réglages --
+
+def clean_scale(scale, width, height):
+    """Hyprland n'accepte que des échelles donnant des pixels logiques entiers."""
+    g = math.gcd(round(width * 120), round(height * 120))
+    k = max(1, round(float(scale) * 120))
+    k = min(k, g)
+    while g % k:
+        k += 1
+    return round(k / 120, 4)
+
+
+def unique_modes(available):
+    """['2560x1440@359.98Hz', ...] -> liste dédoublonnée triée (résolution puis fréquence décroissantes)."""
+    seen = {}
+    for raw in available or []:
+        m = re.match(r"^(\d+)x(\d+)@([\d.]+)Hz$", raw)
+        if not m:
+            continue
+        w, h, r = int(m.group(1)), int(m.group(2)), float(m.group(3))
+        seen[(w, h, round(r, 2))] = f"{w}x{h}@{r:.2f}"
+    return [seen[k] for k in sorted(seen, key=lambda k: (-k[0] * k[1], -k[0], -k[2]))]
+
+
+def mode_supported(m, mode):
+    """Vrai si l'écran sait afficher ce mode (à 0,1 Hz près)."""
+    want = re.match(r"^(\d+)x(\d+)@([\d.]+)$", mode or "")
+    if not want:
+        return False
+    for raw in m.get("availableModes") or []:
+        have = re.match(r"^(\d+)x(\d+)@([\d.]+)Hz$", raw)
+        if have and have.group(1) == want.group(1) and have.group(2) == want.group(2) \
+                and abs(float(have.group(3)) - float(want.group(3))) < 0.1:
+            return True
+    return False
+
+
+def live_settings(m):
+    return {
+        "mode": f"{m['width']}x{m['height']}@{m['refreshRate']:.2f}",
+        "transform": int(m.get("transform", 0)) % 4,
+        "scale": float(m.get("scale", 1)),
+    }
+
+
+def output_settings(state, m):
+    """Réglages mémorisés pour un écran, complétés par l'état actuel. Un mode
+    que l'écran ne sait pas afficher retombe sur « preferred »."""
+    saved = state["outputs"].get(ident(m), {})
+    live = live_settings(m) if not m.get("disabled") and m.get("width") else {}
+    mode = saved.get("mode") or live.get("mode")
+    if not mode or not mode_supported(m, mode):
+        mode = "preferred"
+    return {
+        "mode": mode,
+        "transform": int(saved.get("transform", live.get("transform", 0))),
+        "scale": float(saved.get("scale", live.get("scale", 1))),
+    }
+
+
+def remember_live(state, monitors, profile):
+    """Capture les réglages actifs des écrans qui n'ont encore rien de
+    mémorisé, et la disposition actuelle si le profil n'en a pas."""
+    active = [m for m in monitors if not m.get("disabled") and m.get("width") and m.get("mirrorOf", "none") == "none"]
+    if not profile.get("positions") and len(active) > 1:
+        profile["positions"] = {ident(m): [m["x"], m["y"]] for m in active}
+    for m in active:
+        cur = state["outputs"].setdefault(ident(m), {})
+        for k, v in live_settings(m).items():
+            cur.setdefault(k, v)
+
+
+def mode_size(mode):
+    m = re.match(r"^(\d+)x(\d+)", mode or "")
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
+
+def logical_size(m, settings):
+    w, h = mode_size(settings["mode"])
+    if not w:  # "preferred" : on prend la taille actuelle ou la plus grande proposée
+        if m.get("width") and not m.get("disabled"):
+            w, h = m["width"], m["height"]
+        else:
+            modes = unique_modes(m.get("availableModes"))
+            w, h = mode_size(modes[0]) if modes else (1920, 1080)
+    scale = clean_scale(settings["scale"], w, h)
+    if settings["transform"] % 2:
+        w, h = h, w
+    return round(w / scale), round(h / scale)
+
+
+# ----------------------------------------------------------- disposition --
+
+def overlap(a0, a1, b0, b1):
+    return min(a1, b1) - max(a0, b0)
+
+
+def intersects(a, b):
+    return overlap(a["x"], a["x"] + a["w"], b["x"], b["x"] + b["w"]) > 0 and \
+        overlap(a["y"], a["y"] + a["h"], b["y"], b["y"] + b["h"]) > 0
+
+
+def touches(a, b):
+    """Vrai si a et b partagent un bord sur au moins MIN_OVERLAP px."""
+    need_x = min(MIN_OVERLAP, a["w"], b["w"])
+    need_y = min(MIN_OVERLAP, a["h"], b["h"])
+    if a["x"] + a["w"] == b["x"] or b["x"] + b["w"] == a["x"]:
+        return overlap(a["y"], a["y"] + a["h"], b["y"], b["y"] + b["h"]) >= need_y
+    if a["y"] + a["h"] == b["y"] or b["y"] + b["h"] == a["y"]:
+        return overlap(a["x"], a["x"] + a["w"], b["x"], b["x"] + b["w"]) >= need_x
+    return False
+
+
+def snap_candidates(r, p, threshold=0):
+    """Positions où `r` est collé contre un bord de `p`, au plus près de sa
+    position voulue. Avec un seuil, aligne aussi haut/bas/centre (ou
+    gauche/droite/centre) quand on en est proche."""
+    out = []
+    for side in ("left", "right", "top", "bottom"):
+        if side in ("left", "right"):
+            x = p["x"] - r["w"] if side == "left" else p["x"] + p["w"]
+            need = min(MIN_OVERLAP, r["h"], p["h"])
+            lo, hi = p["y"] - r["h"] + need, p["y"] + p["h"] - need
+            y = min(max(r["y"], lo), hi)
+            for a in (p["y"], p["y"] + p["h"] - r["h"], p["y"] + (p["h"] - r["h"]) / 2):
+                if abs(y - a) <= threshold and lo <= a <= hi:
+                    y = a
+                    break
+        else:
+            y = p["y"] - r["h"] if side == "top" else p["y"] + p["h"]
+            need = min(MIN_OVERLAP, r["w"], p["w"])
+            lo, hi = p["x"] - r["w"] + need, p["x"] + p["w"] - need
+            x = min(max(r["x"], lo), hi)
+            for a in (p["x"], p["x"] + p["w"] - r["w"], p["x"] + (p["w"] - r["w"]) / 2):
+                if abs(x - a) <= threshold and lo <= a <= hi:
+                    x = a
+                    break
+        out.append((round(x), round(y)))
+    return out
+
+
+def snap_layout(rects, threshold=0):
+    """Rend la disposition valide (chaque écran collé à un autre, aucun
+    chevauchement) en bougeant le moins possible, puis décale tout pour
+    n'avoir aucune coordonnée négative. `rects` : [{name, x, y, w, h}], le
+    premier sert d'ancre.
+
+    Les écrans sont posés de proche en proche en suivant les jonctions : un
+    écran qui ne touche que l'écran du milieu (MSI | AOC | portable) est
+    accepté tel quel dès que l'écran du milieu est posé. Seul un écran qui ne
+    touche vraiment rien (ou qui en chevauche un autre) est déplacé, au plus
+    près, contre le bord le plus proche."""
+    if not rects:
+        return {}
+    placed = [dict(rects[0])]
+    remaining = [dict(r) for r in rects[1:]]
+    while remaining:
+        ok = next((r for r in remaining
+                   if any(touches(r, p) for p in placed) and not any(intersects(r, p) for p in placed)), None)
+        if ok is not None:
+            placed.append(ok)
+            remaining.remove(ok)
+            continue
+        # Aucun écran ne se raccroche tel quel : on déplace celui qui a le
+        # moins de chemin à faire.
+        best, best_d, best_src = None, None, None
+        for r in remaining:
+            for p in placed:
+                for x, y in snap_candidates(r, p, threshold):
+                    c = dict(r, x=x, y=y)
+                    if any(intersects(c, q) for q in placed):
+                        continue
+                    d = (x - r["x"]) ** 2 + (y - r["y"]) ** 2
+                    if best_d is None or d < best_d:
+                        best, best_d, best_src = c, d, r
+        if best is None:
+            r = remaining[0]
+            best_src = r
+            best = dict(r, x=max(q["x"] + q["w"] for q in placed), y=placed[0]["y"])
+        placed.append(best)
+        remaining.remove(best_src)
+    min_x = min(p["x"] for p in placed)
+    min_y = min(p["y"] for p in placed)
+    return {p["name"]: (int(p["x"] - min_x), int(p["y"] - min_y)) for p in placed}
+
+
+def side_positions(state, internal, external, where):
+    """Disposition « externe à droite/gauche/dessus/dessous du portable »,
+    l'écran le plus petit centré sur le bord commun."""
+    iw, ih = logical_size(internal, output_settings(state, internal))
+    ew, eh = logical_size(external, output_settings(state, external))
+    if where in ("right", "left"):
+        dy = (eh - ih) // 2
+        iy, ey = max(0, dy), max(0, -dy)
+        return ({ident(internal): [0, iy], ident(external): [iw, ey]} if where == "right"
+                else {ident(internal): [ew, iy], ident(external): [0, ey]})
+    dx = (ew - iw) // 2
+    ix, ex = max(0, dx), max(0, -dx)
+    return ({ident(internal): [ix, 0], ident(external): [ex, ih]} if where == "below"
+            else {ident(internal): [ix, eh], ident(external): [ex, 0]})
+
+
+def layout_positions(state, profile, shown):
+    """Positions finales (px logiques) des écrans affichés côte à côte."""
+    saved = profile.get("positions") or {}
+    rects = []
+    for i, m in enumerate(shown):
+        w, h = logical_size(m, output_settings(state, m))
+        key = ident(m)
+        if key in saved:
+            x, y = saved[key]
+        elif not rects:
+            x, y = 0, 0
+        else:
+            # Écran jamais placé : à droite des autres, aligné en haut.
+            x, y = max(r["x"] + r["w"] for r in rects), min(r["y"] for r in rects)
+        rects.append({"name": key, "x": int(x), "y": int(y), "w": w, "h": h})
+    return snap_layout(rects)
+
+
+# ------------------------------------------------------------ génération --
+
+LUA_HEADER = '''-- Généré par le widget Display (~/.config/omarchy/plugins/will.monitor/display-ctl).
+-- Ne pas éditer à la main : utilise le widget, ou supprime ce fichier pour revenir aux défauts.
+
+-- Écran du portable fermé (clamshell Omarchy) : on ne le rallume pas.
+local function omarchy_flag(name)
+  local f = io.open(os.getenv("HOME") .. "/.local/state/omarchy/toggles/hypr/" .. name .. ".lua")
+  if f then f:close() return true end
+  return false
+end
+local laptop_closed = omarchy_flag("internal-monitor-clamshell")
+'''
+
+
+def lua_rule(key, settings, position="auto", mirror=None, disabled=False):
+    parts = [f'output = "{key}"']
+    if disabled:
+        return "hl.monitor({ " + parts[0] + ", disabled = true })"
+    mode = settings["mode"]
+    parts.append(f'mode = "{mode}"')
+    parts.append(f'position = "{position}"')
+    w, h = mode_size(mode)
+    scale = clean_scale(settings["scale"], w, h) if w else settings["scale"]
+    parts.append(f"scale = {scale:g}")
+    if settings["transform"]:
+        parts.append(f"transform = {settings['transform']}")
+    if mirror:
+        parts.append(f'mirror = "{mirror}"')
+    return "hl.monitor({ " + ", ".join(parts) + " })"
+
+
+def write_rules(state, monitors):
+    internal, externals = split_monitors(monitors)
+    profile = current_profile(state, monitors)
+    mode = profile.get("mode", "extend") if externals else "pc"
+    if not internal and mode in ("pc", "duplicate", "second"):
+        mode = "extend"
+
+    # Écrans affichés côte à côte (hors miroir / éteints).
+    if mode == "extend":
+        shown = ([internal] if internal else []) + externals
+    elif mode == "second":
+        shown = externals
+    else:
+        shown = [internal] if internal else []
+    positions = layout_positions(state, profile, shown)
+    if len(shown) > 1:
+        profile["positions"] = {**(profile.get("positions") or {}), **{k: list(v) for k, v in positions.items()}}
+    pos = lambda m: "%dx%d" % positions[ident(m)] if ident(m) in positions else "auto"
+
+    lines = [LUA_HEADER]
+    if internal and mode != "second":
+        rule = lua_rule(ident(internal), output_settings(state, internal), position=pos(internal))
+        if mode == "pc":
+            # Choix explicite « Écran PC seul » : allumé même couvercle fermé,
+            # sinon plus rien n'afficherait.
+            lines.append(rule)
+        else:
+            lines.append(f"if not laptop_closed then\n  {rule}\nend")
+    for ext in externals:
+        s = output_settings(state, ext)
+        if mode == "pc":
+            lines.append(lua_rule(ident(ext), s, disabled=True))
+        elif mode == "duplicate":
+            # Couvercle fermé : la source du miroir est éteinte, l'externe
+            # s'affiche alors normalement au lieu de rester noir.
+            mirrored = lua_rule(ident(ext), s, position="auto", mirror=internal["name"])
+            plain = lua_rule(ident(ext), s, position="auto")
+            lines.append(f"if laptop_closed then\n  {plain}\nelse\n  {mirrored}\nend")
+        else:
+            lines.append(lua_rule(ident(ext), s, position=pos(ext)))
+
+    os.makedirs(os.path.dirname(LUA_FILE), exist_ok=True)
+    tmp = LUA_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp, LUA_FILE)
+
+    # Les toggles Omarchy (miroir / portable éteint) passent avant nos règles ;
+    # on les aligne sur le mode choisi. Le toggle "disable" sert au mode
+    # "second" : la récupération d'Omarchy rallume aussi le portable si les
+    # écrans externes disparaissent (en plus de `display-ctl watch`).
+    if os.path.exists(MIRROR_TOGGLE):
+        os.remove(MIRROR_TOGGLE)
+    if mode == "second" and internal and externals:
+        os.makedirs(TOGGLES, exist_ok=True)
+        with open(DISABLE_TOGGLE, "w") as f:
+            f.write(f'hl.monitor({{ output = "{internal["name"]}", disabled = true }})\n')
+    elif os.path.exists(DISABLE_TOGGLE):
+        os.remove(DISABLE_TOGGLE)
+    return mode
+
+
+def apply(state, monitors=None):
+    monitors = monitors if monitors is not None else hypr_monitors()
+    mode = write_rules(state, monitors)
+    state["version"] = 2
+    save_state(state)
+    subprocess.run(["hyprctl", "reload"], capture_output=True)
+    retry_blank_outputs()
+    if mode != "second":
+        subprocess.run(["hyprctl", "dispatch", 'hl.dsp.dpms({ action = "enable" })'], capture_output=True)
+    ensure_something_on()
+
+
+def retry_blank_outputs():
+    """Juste après un branchement, le pilote peut refuser tous les modes d'un
+    écran (lien HDMI/DP pas encore prêt) : il reste « allumé » en 0×0. On
+    réessaie quelques fois, puis on prévient."""
+    blank = []
+    for delay in (1, 2, 4):
+        time.sleep(delay)
+        blank = [m["name"] for m in hypr_monitors() if not m.get("disabled") and not m.get("width")]
+        if not blank:
+            return
+        log(f"écran(s) sans image : {', '.join(blank)}, nouvel essai")
+        subprocess.run(["hyprctl", "reload"], capture_output=True)
+    time.sleep(2)
+    blank = [m["name"] for m in hypr_monitors() if not m.get("disabled") and not m.get("width")]
+    if blank:
+        log(f"écran(s) toujours sans image : {', '.join(blank)}")
+        subprocess.run(["omarchy-notification-send", "-g", "󰍹",
+                        f"Impossible d'allumer {', '.join(blank)} : essaie une autre résolution ou rebranche-le"],
+                       capture_output=True)
+
+
+def ensure_something_on():
+    """Garde-fou : jamais zéro écran allumé. Si plus rien n'affiche, on
+    rallume le portable de force."""
+    time.sleep(0.6)
+    monitors = hypr_monitors()
+    if any(not m.get("disabled") for m in monitors):
+        return
+    internal, _ = split_monitors(monitors)
+    if not internal:
+        return
+    log("aucun écran allumé : rallumage forcé du portable")
+    if os.path.exists(DISABLE_TOGGLE):
+        os.remove(DISABLE_TOGGLE)
+    subprocess.run(["hyprctl", "eval",
+                    f'hl.monitor({{ output = "{internal["name"]}", mode = "preferred", position = "auto", scale = "auto" }})'],
+                   capture_output=True)
+    subprocess.run(["hyprctl", "dispatch", 'hl.dsp.dpms({ action = "enable" })'], capture_output=True)
+
+
+# -------------------------------------------------------- confirmation --
+
+def pending_deadline():
+    try:
+        with open(PENDING_FILE) as f:
+            return float(f.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def clear_pending():
+    try:
+        os.remove(PENDING_FILE)
+    except FileNotFoundError:
+        pass
+
+
+def restore_snapshot():
+    try:
+        with open(SNAPSHOT_FILE) as f:
+            state = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        raise SystemExit("aucune sauvegarde")
+    clear_pending()
+    state.setdefault("outputs", {})
+    state.setdefault("profiles", {})
+    apply(state)
+
+
+# ------------------------------------------------------------- commandes --
+
+def cmd_state():
+    monitors = hypr_monitors()
+    state = migrate(load_state(), monitors)
+    profile = current_profile(state, monitors)
+    internal, externals = split_monitors(monitors)
+    outputs = []
+    for m in monitors:
+        outputs.append({
+            "name": m["name"],
+            "id": ident(m),
+            "label": "Écran du portable" if is_internal(m["name"]) else (" ".join(filter(None, [m.get("make"), m.get("model")])) or m["name"]),
+            "internal": is_internal(m["name"]),
+            "enabled": not m.get("disabled"),
+            "focused": bool(m.get("focused")),
+            "mirrorOf": m.get("mirrorOf", "none"),
+            "x": m.get("x", 0), "y": m.get("y", 0),
+            "width": m.get("width", 0), "height": m.get("height", 0),
+            "scale": m.get("scale", 1),
+            "transform": m.get("transform", 0),
+            "refreshRate": m.get("refreshRate", 0),
+            # Diagonale de la dalle (EDID, en pouces) : affichage seulement.
+            "inches": round(math.hypot(m.get("physicalWidth") or 0, m.get("physicalHeight") or 0) / 25.4),
+            "modes": unique_modes(m.get("availableModes")),
+            "saved": output_settings(state, m),
+        })
+    print(json.dumps({
+        "pendingDeadline": pending_deadline(),
+        "now": time.time(),
+        "mode": detect_mode(monitors, profile),
+        "minOverlap": MIN_OVERLAP,
+        "hasExternal": bool(internal and externals),
+        "outputs": outputs,
+    }, ensure_ascii=False))
+
+
+def cmd_reconcile():
+    """Applique le profil mémorisé pour les écrans actuellement branchés."""
+    monitors = hypr_monitors()
+    if not monitors:
+        return
+    state = migrate(load_state(), monitors)
+    profile = current_profile(state, monitors)
+    log(f"écrans : {profile_key(monitors)} -> mode {profile.get('mode')}")
+    apply(state, monitors)
+
+
+def cmd_watch():
+    """Démon : réapplique le bon profil à chaque branchement/débranchement."""
+    lock = open(WATCH_LOCK, "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log("déjà lancé")
+        return
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+    if not sig:
+        raise SystemExit("HYPRLAND_INSTANCE_SIGNATURE absent")
+    path = os.path.join(RUNTIME, "hypr", sig, ".socket2.sock")
+
+    def connected():
+        return profile_key(hypr_monitors())
+
+    last = connected()
+    while True:
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(path)
+        except OSError:
+            if not os.path.exists(os.path.dirname(path)):
+                return  # Hyprland est parti
+            time.sleep(2)
+            continue
+        buf = b""
+        due = None
+        while True:
+            timeout = None if due is None else max(0, due - time.time())
+            ready, _, _ = select.select([sock], [], [], timeout)
+            if ready:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                *events, buf = buf.split(b"\n")
+                if any(e.startswith((b"monitoradded", b"monitorremoved")) for e in events):
+                    # On attend que la rafale d'évènements se calme.
+                    due = time.time() + 1.5
+            elif due is not None:
+                due = None
+                now = connected()
+                # Ignore nos propres reload (mêmes écrans branchés).
+                if now != last:
+                    log(f"branchement détecté : {last or '(aucun)'} -> {now}")
+                    last = now
+                    try:
+                        with open(LOCK_FILE, "w") as lf:
+                            fcntl.flock(lf, fcntl.LOCK_EX)
+                            cmd_reconcile()
+                    except Exception as e:  # le démon ne doit jamais mourir
+                        log(f"erreur : {e}")
+                    last = connected()
+        sock.close()
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+
+    cmd, args = argv[0], argv[1:]
+    if cmd == "state":
+        cmd_state()
+        return 0
+    if cmd == "watch":
+        cmd_watch()
+        return 0
+    if cmd == "keep":
+        clear_pending()
+        return 0
+    if cmd == "revert-after":
+        # Lancé en arrière-plan par `confirm` : rétablit si personne n'a confirmé.
+        deadline = float(args[0])
+        time.sleep(max(0, deadline - time.time()))
+        if pending_deadline() == deadline:
+            with open(LOCK_FILE, "w") as lf:
+                fcntl.flock(lf, fcntl.LOCK_EX)
+                restore_snapshot()
+            subprocess.run(["omarchy-notification-send", "-g", "󰍹", "Paramètres d'affichage rétablis"],
+                           capture_output=True)
+        return 0
+
+    # Une seule modification à la fois (widget, démon, retour automatique).
+    lock = open(LOCK_FILE, "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+
+    if cmd == "revert":
+        if pending_deadline():
+            restore_snapshot()
+        return 0
+    if cmd == "reconcile":
+        cmd_reconcile()
+        return 0
+
+    monitors = hypr_monitors()
+    state = migrate(load_state(), monitors)
+    profile = current_profile(state, monitors)
+    # L'état réel prime (ex. miroir activé via un raccourci Omarchy).
+    profile["mode"] = detect_mode(monitors, profile)
+    remember_live(state, monitors, profile)
+    by_name = {m["name"]: m for m in monitors}
+
+    if cmd == "mode":
+        if not args or args[0] not in MODES:
+            raise SystemExit("mode attendu : " + "|".join(MODES))
+        internal, externals = split_monitors(monitors)
+        if args[0] != "pc" and internal and not externals:
+            raise SystemExit("Aucun écran externe branché")
+        profile["mode"] = args[0]
+    elif cmd == "place":
+        # place <écran> <x> <y> [<écran> <x> <y> ...]  (px logiques)
+        if len(args) % 3 or not args:
+            raise SystemExit("usage : place <écran> <x> <y> ...")
+        positions = dict(profile.get("positions") or {})
+        for i in range(0, len(args), 3):
+            name, x, y = args[i:i + 3]
+            if name not in by_name or not re.match(r"^-?\d+$", x) or not re.match(r"^-?\d+$", y):
+                raise SystemExit(f"placement invalide : {name} {x} {y}")
+            positions[ident(by_name[name])] = [int(x), int(y)]
+        profile["positions"] = positions
+        if profile.get("mode") not in ("extend", "second"):
+            profile["mode"] = "extend"
+    elif cmd == "position":
+        # Compat : place l'écran externe d'un côté du portable.
+        if not args or args[0] not in POSITIONS:
+            raise SystemExit("position attendue : " + "|".join(POSITIONS))
+        internal, externals = split_monitors(monitors)
+        if internal and externals:
+            profile["positions"] = {**(profile.get("positions") or {}),
+                                    **side_positions(state, internal, externals[0], args[0])}
+        profile["mode"] = "extend"
+    elif cmd in ("set", "confirm"):
+        if cmd == "confirm" and not pending_deadline():
+            os.makedirs(os.path.dirname(SNAPSHOT_FILE), exist_ok=True)
+            with open(SNAPSHOT_FILE, "w") as f:
+                json.dump(state, f)
+        if not args or args[0] not in by_name:
+            raise SystemExit("écran inconnu")
+        cur = state["outputs"].setdefault(ident(by_name[args[0]]), {})
+        for kv in args[1:]:
+            key, _, val = kv.partition("=")
+            if key == "mode" and SAFE_MODE.match(val):
+                cur["mode"] = val
+                w, h = mode_size(val)
+                cur["scale"] = clean_scale(cur.get("scale", 1), w, h)
+            elif key == "transform" and val in ("0", "1", "2", "3"):
+                cur["transform"] = int(val)
+            elif key == "scale" and re.match(r"^\d+(\.\d+)?$", val) and 0.5 <= float(val) <= 4:
+                w, h = mode_size(cur.get("mode"))
+                cur["scale"] = clean_scale(val, w, h) if w else float(val)
+            else:
+                raise SystemExit(f"réglage invalide : {kv}")
+    else:
+        raise SystemExit(f"commande inconnue : {cmd}")
+
+    apply(state, monitors)
+
+    if cmd == "confirm":
+        deadline = round(time.time() + CONFIRM_SECONDS, 3)
+        with open(PENDING_FILE, "w") as f:
+            f.write(f"{deadline}\n")
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "revert-after", str(deadline)],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    elif cmd in ("mode", "position", "place"):
+        clear_pending()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

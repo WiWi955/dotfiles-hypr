@@ -1,0 +1,5 @@
+#!/bin/bash
+# Passage à un autre thème que wiwi : on coupe le fond animé pour laisser le fond du nouveau thème.
+# (Un simple rafraîchissement de wiwi, ex. couleurs régénérées par wiwi-wallpaper-colors, ne doit pas le couper.)
+[[ $1 == wiwi ]] && exit 0
+"$HOME/.local/bin/wiwi-animated-bg" stop

@@ -1,0 +1,13 @@
+[Unit]
+Description=Fond d'écran animé (mpvpaper)
+PartOf=graphical-session.target
+After=graphical-session.target
+ConditionPathExists=%h/.local/state/wiwi-bg/animated
+
+[Service]
+ExecStart=/bin/sh -c 'exec mpvpaper --auto-pause --layer bottom -o "no-audio loop hwdec=auto panscan=1.0 vf=fps=30 really-quiet" ALL "$(cat %h/.local/state/wiwi-bg/animated)"'
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,50 @@
+# Chemins (relatifs à $HOME) suivis par ce dépôt.
+# sync.sh les copie depuis ce PC vers le dépôt, install.sh les recopie dans $HOME.
+
+.bashrc
+
+# Hyprland : keybinds, look & feel, écrans, autostart, règles de fenêtres
+.config/hypr
+
+# Omarchy : barre + widgets (shell.json), menus, plugins, thème wiwi, hooks
+.config/omarchy/shell.json
+.config/omarchy/shell.toml
+.config/omarchy/display-layout.json
+.config/omarchy/extensions
+.config/omarchy/plugins
+.config/omarchy/themes/wiwi
+.config/omarchy/hooks/theme-set.d/wiwi-stop-animated-bg
+.config/omarchy/branding
+.config/omarchy/defaults
+
+# Applis
+.config/kitty/kitty.conf
+.config/fastfetch
+.config/git/config
+.config/voxtype/config.toml
+.config/tensaku/config.toml
+.config/mise/config.toml
+.config/fcitx5/profile
+.config/environment.d
+.config/xdg-terminals.list
+.config/mimeapps.list
+
+# Services systemd utilisateur
+.config/systemd/user/wiwi-bg-sync.path
+.config/systemd/user/wiwi-bg-sync.service
+.config/systemd/user/wiwi-wallpaper-colors.path
+.config/systemd/user/wiwi-wallpaper-colors.service
+.config/systemd/user/wiwi-mpvpaper.service
+.config/systemd/user/voxtype.service
+.config/systemd/user/rclone-gdrive.service
+
+# Scripts perso (sélecteur de fond SUPER+W, couleurs auto, widgets lab-ia/NAS/PC)
+.local/bin/wiwi-animated-bg
+.local/bin/wiwi-bg-switcher
+.local/bin/wiwi-bg-sync
+.local/bin/wiwi-wallpaper-colors
+.local/bin/ia
+.local/bin/lab-ia-status
+.local/bin/nas-status
+.local/bin/pc-status
+.local/share/wiwi-bg/button

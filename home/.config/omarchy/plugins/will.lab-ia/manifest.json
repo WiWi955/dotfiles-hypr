@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "will.lab-ia",
+  "name": "Lab IA",
+  "version": "1.0.0",
+  "author": "will",
+  "description": "État en direct du serveur IA (GPU, système, modèles Ollama)",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Lab IA",
+    "description": "État en direct du serveur IA (GPU, système, modèles Ollama)",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

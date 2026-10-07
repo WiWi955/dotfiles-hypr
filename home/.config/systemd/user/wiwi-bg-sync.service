@@ -1,0 +1,6 @@
+[Unit]
+Description=Recharge les fonds d'écran du thème wiwi
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/wiwi-bg-sync

@@ -1,0 +1,8 @@
+[Unit]
+Description=Watch the Omarchy wallpaper for wiwi theme colors
+
+[Path]
+PathChanged=%h/.local/state/omarchy/current
+
+[Install]
+WantedBy=default.target

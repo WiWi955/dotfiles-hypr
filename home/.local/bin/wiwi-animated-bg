@@ -1,0 +1,25 @@
+#!/bin/bash
+# Fond d'écran animé (vidéo / GIF) via mpvpaper.
+#   wiwi-animated-bg start <fichier>   lance l'animation (et la garde au prochain login)
+#   wiwi-animated-bg stop              revient au fond d'écran normal d'Omarchy
+#   wiwi-animated-bg current           affiche le fichier animé actif
+STATE_FILE="$HOME/.local/state/wiwi-bg/animated"
+
+case "$1" in
+  start)
+    [[ -f $2 ]] || { echo "Fichier introuvable : $2" >&2; exit 1; }
+    realpath "$2" >"$STATE_FILE"
+    systemctl --user restart wiwi-mpvpaper.service
+    ;;
+  stop)
+    rm -f "$STATE_FILE"
+    systemctl --user stop wiwi-mpvpaper.service
+    ;;
+  current)
+    [[ -f $STATE_FILE ]] && cat "$STATE_FILE"
+    ;;
+  *)
+    echo "Usage: wiwi-animated-bg start <fichier> | stop | current" >&2
+    exit 1
+    ;;
+esac
